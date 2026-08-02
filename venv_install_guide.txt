@@ -1,0 +1,16 @@
+venv_install_guide.txt
+
+Tershire
+
+# set up environment
+python3.12 -m venv music-py312
+
+# install libraries
+- yt-dlp [x.x.x]
+python3 -m pip install -U "yt-dlp[default]"
+
+- PySide6 [6.8.3] (because 6.8.X is LTS.)
+pip install PySide6==6.8.3
+
+- mutagen, syncedlyrics, requests (for tag_editor_gui.py)
+pip install mutagen syncedlyrics requests
