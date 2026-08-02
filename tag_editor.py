@@ -13,13 +13,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import requests
-import syncedlyrics
+from rapidfuzz import fuzz
+from syncedlyrics import Genius, Megalobiz, Musixmatch, NetEase
 from mutagen.id3 import APIC, COMM, ID3, TALB, TCON, TDRC, TIT2, TPE1, TRCK, USLT
 from mutagen.mp3 import MP3
 
 AUDIO_EXTENSIONS = {".mp3", ".m4a", ".flac", ".wav"}
 
 ITUNES_SEARCH_URL = "https://itunes.apple.com/search"
+LRCLIB_SEARCH_URL = "https://lrclib.net/api/search"
+LYRICS_MATCH_MIN_SCORE = 60
 
 YT_DLP_ID_SUFFIX_RE = re.compile(r"\s*\[[^\[\]]+\]\s*$")
 YT_DLP_ID_CAPTURE_RE = re.compile(r"\[([^\[\]]+)\]\s*$")
@@ -37,6 +40,7 @@ class Track:
     year: str = ""
     album_art: bytes | None = None
     lyrics: str = ""
+    lyrics_source: str = ""
     status: str = ""
 
 
@@ -118,16 +122,73 @@ def search_metadata(track: Track) -> dict:
     }
 
 
-def search_lyrics(track: Track) -> str | None:
-    """Look up synced (LRC) lyrics via syncedlyrics."""
+def _search_lrclib(track: Track, album_hint: str) -> dict | None:
+    """Search LRCLIB directly so results can be ranked by album similarity.
+
+    LRCLIB is the only lyrics provider that returns album names alongside
+    results, so it's the only one we can rank by album match ourselves.
+    """
     query = f"{track.artist} {track.title}".strip()
     if not query:
         return None
-    return syncedlyrics.search(query)
+
+    response = requests.get(LRCLIB_SEARCH_URL, params={"q": query}, timeout=10)
+    if not response.ok:
+        return None
+    results = response.json()
+    if not results:
+        return None
+
+    def title_artist_score(entry: dict) -> float:
+        return fuzz.token_set_ratio(
+            f'{entry.get("artistName", "")} {entry.get("trackName", "")}'.lower(), query.lower()
+        )
+
+    candidates = [r for r in results if title_artist_score(r) >= LYRICS_MATCH_MIN_SCORE]
+    if not candidates:
+        return None
+
+    if album_hint:
+        candidates.sort(
+            key=lambda r: fuzz.token_set_ratio((r.get("albumName") or "").lower(), album_hint.lower()),
+            reverse=True,
+        )
+    else:
+        candidates.sort(key=title_artist_score, reverse=True)
+
+    best = candidates[0]
+    lyrics = best.get("syncedLyrics") or best.get("plainLyrics")
+    if not lyrics:
+        return None
+    return {"lyrics": lyrics, "source": "LRCLIB"}
+
+
+def _search_other_lyrics_providers(track: Track) -> dict | None:
+    """Fall back to syncedlyrics' other providers (no album-level ranking available)."""
+    query = f"{track.artist} {track.title}".strip()
+    if not query:
+        return None
+
+    for provider in (Musixmatch(), NetEase(), Megalobiz(), Genius()):
+        try:
+            lrc = provider.get_lrc(query)
+        except Exception:
+            continue
+        if lrc and (lrc.synced or lrc.unsynced):
+            return {"lyrics": lrc.synced or lrc.unsynced, "source": str(provider)}
+    return None
+
+
+def search_lyrics(track: Track, album_hint: str | None = None) -> dict | None:
+    """Look up (synced) lyrics, preferring the result closest to `album_hint`."""
+    album = track.album if album_hint is None else album_hint
+    return _search_lrclib(track, album) or _search_other_lyrics_providers(track)
 
 
 def auto_fill(track: Track) -> Track:
     """Fetch metadata and lyrics for a track, returning the updated track."""
+    user_album = track.album  # preserve the user-specified album for lyrics ranking
+
     metadata = search_metadata(track)
     track.artist = metadata.get("artist", track.artist)
     track.album = metadata.get("album", track.album)
@@ -139,11 +200,12 @@ def auto_fill(track: Track) -> Track:
     if metadata.get("album_art"):
         track.album_art = metadata["album_art"]
 
-    lyrics = search_lyrics(track)
-    if lyrics:
-        track.lyrics = lyrics
+    lyrics_result = search_lyrics(track, album_hint=user_album or track.album)
+    if lyrics_result:
+        track.lyrics = lyrics_result["lyrics"]
+        track.lyrics_source = lyrics_result["source"]
 
-    track.status = "found" if metadata or lyrics else "not found"
+    track.status = "found" if metadata or lyrics_result else "not found"
     return track
 
 

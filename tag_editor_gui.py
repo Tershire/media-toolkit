@@ -113,6 +113,8 @@ class MainWindow(QMainWindow):
         self.apply_art_button.clicked.connect(self._apply_album_art_to_all)
 
         self.lyrics_edit = QPlainTextEdit()
+        self.lyrics_source_label = QLabel("")
+        self.lyrics_source_label.setStyleSheet("color: gray; font-style: italic;")
         self.lrc_sidecar_checkbox = QCheckBox("Also write .lrc sidecar file")
         self.rename_checkbox = QCheckBox("Rename file to match title")
 
@@ -199,6 +201,7 @@ class MainWindow(QMainWindow):
 
         lyrics_layout = QVBoxLayout()
         lyrics_layout.addWidget(QLabel("Lyrics"))
+        lyrics_layout.addWidget(self.lyrics_source_label)
         lyrics_layout.addWidget(self.lyrics_edit)
         lyrics_layout.addWidget(self.lrc_sidecar_checkbox)
 
@@ -289,6 +292,7 @@ class MainWindow(QMainWindow):
             self.genre_input.clear()
             self.year_input.clear()
             self.lyrics_edit.clear()
+            self.lyrics_source_label.clear()
             self.art_label.setText("No artwork")
             self.art_label.setPixmap(QPixmap())
             self._set_detail_panel_enabled(False)
@@ -302,6 +306,7 @@ class MainWindow(QMainWindow):
         self.genre_input.setText(track.genre)
         self.year_input.setText(track.year)
         self.lyrics_edit.setPlainText(track.lyrics)
+        self.lyrics_source_label.setText(f"Source: {track.lyrics_source}" if track.lyrics_source else "")
         self._update_art_preview(track)
         self._set_detail_panel_enabled(True)
 
