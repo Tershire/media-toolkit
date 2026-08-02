@@ -14,7 +14,7 @@ from pathlib import Path
 
 import requests
 import syncedlyrics
-from mutagen.id3 import APIC, ID3, TALB, TCON, TDRC, TIT2, TPE1, TRCK, USLT
+from mutagen.id3 import APIC, COMM, ID3, TALB, TCON, TDRC, TIT2, TPE1, TRCK, USLT
 from mutagen.mp3 import MP3
 
 AUDIO_EXTENSIONS = {".mp3", ".m4a", ".flac", ".wav"}
@@ -22,6 +22,8 @@ AUDIO_EXTENSIONS = {".mp3", ".m4a", ".flac", ".wav"}
 ITUNES_SEARCH_URL = "https://itunes.apple.com/search"
 
 YT_DLP_ID_SUFFIX_RE = re.compile(r"\s*\[[^\[\]]+\]\s*$")
+YT_DLP_ID_CAPTURE_RE = re.compile(r"\[([^\[\]]+)\]\s*$")
+INVALID_FILENAME_CHARS_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
 
 @dataclass
@@ -45,6 +47,17 @@ def _parse_filename(path: Path) -> tuple[str, str]:
         artist, title = stem.split(" - ", 1)
         return artist.strip(), title.strip()
     return "", stem
+
+
+def extract_youtube_id(path: Path) -> str | None:
+    """Pull the trailing "[<id>]" yt-dlp suffix out of a filename, if present."""
+    match = YT_DLP_ID_CAPTURE_RE.search(path.stem)
+    return match.group(1) if match else None
+
+
+def sanitize_filename(name: str) -> str:
+    cleaned = INVALID_FILENAME_CHARS_RE.sub("_", name).strip().strip(".")
+    return cleaned or "untitled"
 
 
 def load_tracks(paths: list[Path]) -> list[Track]:
@@ -134,10 +147,16 @@ def auto_fill(track: Track) -> Track:
     return track
 
 
-def save_track(track: Track, write_lrc_sidecar: bool = False) -> None:
+def save_track(
+    track: Track,
+    write_lrc_sidecar: bool = False,
+    rename_to_title: bool = False,
+) -> None:
     """Embed the track's fields into the audio file's tags."""
     if track.path.suffix.lower() != ".mp3":
         raise ValueError(f"Unsupported file type for tagging: {track.path.suffix}")
+
+    video_id = extract_youtube_id(track.path)
 
     audio = MP3(track.path)
     if audio.tags is None:
@@ -153,6 +172,9 @@ def save_track(track: Track, write_lrc_sidecar: bool = False) -> None:
         tags.setall("TCON", [TCON(encoding=3, text=[track.genre])])
     if track.year:
         tags.setall("TDRC", [TDRC(encoding=3, text=[track.year])])
+    if video_id:
+        comment = f"https://www.youtube.com/watch?v={video_id}"
+        tags.setall("COMM", [COMM(encoding=3, lang="eng", desc="", text=[comment])])
 
     if track.album_art:
         tags.setall(
@@ -167,6 +189,12 @@ def save_track(track: Track, write_lrc_sidecar: bool = False) -> None:
         )
 
     audio.save()
+
+    if rename_to_title and track.title:
+        new_path = track.path.with_name(sanitize_filename(track.title) + track.path.suffix)
+        if new_path != track.path:
+            track.path.rename(new_path)
+            track.path = new_path
 
     if write_lrc_sidecar and track.lyrics:
         track.path.with_suffix(".lrc").write_text(track.lyrics, encoding="utf-8")

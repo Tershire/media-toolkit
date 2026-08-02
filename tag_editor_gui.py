@@ -90,6 +90,17 @@ class MainWindow(QMainWindow):
         self.year_input = QLineEdit()
         self.year_input.setPlaceholderText("e.g. 2024")
 
+        self.apply_artist_button = QPushButton("Apply to All")
+        self.apply_artist_button.clicked.connect(lambda: self._apply_field_to_all("artist", self.artist_input.text()))
+        self.apply_album_button = QPushButton("Apply to All")
+        self.apply_album_button.clicked.connect(lambda: self._apply_field_to_all("album", self.album_input.text()))
+        self.apply_track_total_button = QPushButton("Apply Total to All")
+        self.apply_track_total_button.clicked.connect(self._apply_track_total_to_all)
+        self.apply_genre_button = QPushButton("Apply to All")
+        self.apply_genre_button.clicked.connect(lambda: self._apply_field_to_all("genre", self.genre_input.text()))
+        self.apply_year_button = QPushButton("Apply to All")
+        self.apply_year_button.clicked.connect(lambda: self._apply_field_to_all("year", self.year_input.text()))
+
         self.art_label = QLabel("No artwork")
         self.art_label.setFixedSize(ART_THUMBNAIL_SIZE, ART_THUMBNAIL_SIZE)
         self.art_label.setStyleSheet("border: 1px solid gray;")
@@ -98,9 +109,12 @@ class MainWindow(QMainWindow):
         browse_art_button.clicked.connect(self._browse_album_art)
         self.save_art_button = QPushButton("Save As...")
         self.save_art_button.clicked.connect(self._save_album_art_as)
+        self.apply_art_button = QPushButton("Apply to All")
+        self.apply_art_button.clicked.connect(self._apply_album_art_to_all)
 
         self.lyrics_edit = QPlainTextEdit()
         self.lrc_sidecar_checkbox = QCheckBox("Also write .lrc sidecar file")
+        self.rename_checkbox = QCheckBox("Rename file to match title")
 
         self.auto_fill_selected_button = QPushButton("Auto-Fill (Selected)")
         self.auto_fill_selected_button.clicked.connect(self._auto_fill_selected)
@@ -126,16 +140,31 @@ class MainWindow(QMainWindow):
         left_layout.addWidget(QLabel("Drop songs or a folder here"))
         left_layout.addWidget(self.track_list)
 
-        genre_year_row = QHBoxLayout()
-        genre_year_row.addWidget(QLabel("Genre"))
-        genre_year_row.addWidget(self.genre_input)
-        genre_year_row.addWidget(QLabel("Year"))
-        genre_year_row.addWidget(self.year_input)
+        artist_row = QHBoxLayout()
+        artist_row.addWidget(self.artist_input)
+        artist_row.addWidget(self.apply_artist_button)
+
+        album_row = QHBoxLayout()
+        album_row.addWidget(self.album_input)
+        album_row.addWidget(self.apply_album_button)
+
+        track_number_row = QHBoxLayout()
+        track_number_row.addWidget(self.track_number_input)
+        track_number_row.addWidget(self.apply_track_total_button)
+
+        genre_row = QHBoxLayout()
+        genre_row.addWidget(self.genre_input)
+        genre_row.addWidget(self.apply_genre_button)
+
+        year_row = QHBoxLayout()
+        year_row.addWidget(self.year_input)
+        year_row.addWidget(self.apply_year_button)
 
         art_row = QHBoxLayout()
         art_row.addWidget(self.art_label)
         art_row.addWidget(browse_art_button)
         art_row.addWidget(self.save_art_button)
+        art_row.addWidget(self.apply_art_button)
         art_row.addStretch()
 
         auto_fill_row = QHBoxLayout()
@@ -147,28 +176,36 @@ class MainWindow(QMainWindow):
         save_row.addWidget(self.save_selected_button)
         save_row.addWidget(self.save_all_button)
 
-        right_layout = QVBoxLayout()
-        right_layout.addWidget(QLabel("Title"))
-        right_layout.addWidget(self.title_input)
-        right_layout.addWidget(QLabel("Artist"))
-        right_layout.addWidget(self.artist_input)
-        right_layout.addWidget(QLabel("Album"))
-        right_layout.addWidget(self.album_input)
-        right_layout.addWidget(QLabel("Track #"))
-        right_layout.addWidget(self.track_number_input)
-        right_layout.addLayout(genre_year_row)
-        right_layout.addWidget(QLabel("Album art"))
-        right_layout.addLayout(art_row)
-        right_layout.addWidget(QLabel("Lyrics"))
-        right_layout.addWidget(self.lyrics_edit)
-        right_layout.addWidget(self.lrc_sidecar_checkbox)
-        right_layout.addLayout(auto_fill_row)
-        right_layout.addLayout(save_row)
-        right_layout.addWidget(self.progress_bar)
+        middle_layout = QVBoxLayout()
+        middle_layout.addWidget(QLabel("Title"))
+        middle_layout.addWidget(self.title_input)
+        middle_layout.addWidget(QLabel("Artist"))
+        middle_layout.addLayout(artist_row)
+        middle_layout.addWidget(QLabel("Album"))
+        middle_layout.addLayout(album_row)
+        middle_layout.addWidget(QLabel("Track #"))
+        middle_layout.addLayout(track_number_row)
+        middle_layout.addWidget(QLabel("Genre"))
+        middle_layout.addLayout(genre_row)
+        middle_layout.addWidget(QLabel("Year"))
+        middle_layout.addLayout(year_row)
+        middle_layout.addWidget(QLabel("Album art"))
+        middle_layout.addLayout(art_row)
+        middle_layout.addWidget(self.rename_checkbox)
+        middle_layout.addLayout(auto_fill_row)
+        middle_layout.addLayout(save_row)
+        middle_layout.addWidget(self.progress_bar)
+        middle_layout.addStretch()
+
+        lyrics_layout = QVBoxLayout()
+        lyrics_layout.addWidget(QLabel("Lyrics"))
+        lyrics_layout.addWidget(self.lyrics_edit)
+        lyrics_layout.addWidget(self.lrc_sidecar_checkbox)
 
         body_layout = QHBoxLayout()
         body_layout.addLayout(left_layout, stretch=1)
-        body_layout.addLayout(right_layout, stretch=2)
+        body_layout.addLayout(middle_layout, stretch=2)
+        body_layout.addLayout(lyrics_layout, stretch=2)
 
         main_layout = QVBoxLayout()
         main_layout.addLayout(body_layout)
@@ -177,7 +214,7 @@ class MainWindow(QMainWindow):
         container = QWidget()
         container.setLayout(main_layout)
         self.setCentralWidget(container)
-        self.resize(760, 560)
+        self.resize(1040, 620)
 
         self._set_detail_panel_enabled(False)
 
@@ -222,6 +259,12 @@ class MainWindow(QMainWindow):
             self.save_selected_button,
             self.auto_fill_selected_button,
             self.save_art_button,
+            self.apply_artist_button,
+            self.apply_album_button,
+            self.apply_track_total_button,
+            self.apply_genre_button,
+            self.apply_year_button,
+            self.apply_art_button,
         ):
             widget.setEnabled(enabled)
 
@@ -306,6 +349,45 @@ class MainWindow(QMainWindow):
         Path(file_path).write_bytes(track.album_art)
         self.log_view.appendPlainText(f"Saved album art to {file_path}")
 
+    # -- bulk apply --------------------------------------------------------
+
+    def _apply_field_to_all(self, field_name: str, value: str) -> None:
+        if not self.tracks:
+            return
+        for track in self.tracks:
+            setattr(track, field_name, value)
+        self.log_view.appendPlainText(
+            f"Applied {field_name} = {value!r} to all {len(self.tracks)} track(s)."
+        )
+
+    def _apply_track_total_to_all(self) -> None:
+        text = self.track_number_input.text().strip()
+        if "/" not in text:
+            QMessageBox.information(
+                self, "No total", 'Enter a track number with a total, e.g. "3/12", first.'
+            )
+            return
+        total = text.split("/", 1)[1].strip()
+        for track in self.tracks:
+            prefix = track.track_number.split("/", 1)[0].strip() if track.track_number else ""
+            track.track_number = f"{prefix}/{total}"
+        self.log_view.appendPlainText(
+            f"Applied total track count ({total}) to all {len(self.tracks)} track(s)."
+        )
+        if 0 <= self.current_index < len(self.tracks):
+            self.track_number_input.setText(self.tracks[self.current_index].track_number)
+
+    def _apply_album_art_to_all(self) -> None:
+        if not (0 <= self.current_index < len(self.tracks)):
+            return
+        track = self.tracks[self.current_index]
+        if not track.album_art:
+            QMessageBox.information(self, "No artwork", "This track has no album art to apply.")
+            return
+        for other in self.tracks:
+            other.album_art = track.album_art
+        self.log_view.appendPlainText(f"Applied album art to all {len(self.tracks)} track(s).")
+
     # -- auto-fill -----------------------------------------------------
 
     def _start_auto_fill(self, indices: list[int]) -> None:
@@ -357,7 +439,11 @@ class MainWindow(QMainWindow):
     def _save_track(self, index: int) -> bool:
         track = self.tracks[index]
         try:
-            save_track(track, write_lrc_sidecar=self.lrc_sidecar_checkbox.isChecked())
+            save_track(
+                track,
+                write_lrc_sidecar=self.lrc_sidecar_checkbox.isChecked(),
+                rename_to_title=self.rename_checkbox.isChecked(),
+            )
         except Exception as exc:  # noqa: BLE001 - surface any tagging failure
             track.status = "save failed"
             self.log_view.appendPlainText(f"{track.path.name}: save failed - {exc}")
