@@ -9,9 +9,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QThread, Signal
+from PySide6.QtCore import QThread, Signal, Qt
 from PySide6.QtGui import QDragEnterEvent, QDropEvent, QPixmap
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QCheckBox,
     QFileDialog,
@@ -24,6 +25,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QSplitter,
     QVBoxLayout,
     QWidget,
 )
@@ -79,7 +81,13 @@ class MainWindow(QMainWindow):
         self.worker: AutoFillWorker | None = None
 
         self.track_list = QListWidget()
+        self.track_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.track_list.currentRowChanged.connect(self._on_row_changed)
+
+        self.remove_selected_button = QPushButton("Remove Selected")
+        self.remove_selected_button.clicked.connect(self._remove_selected_tracks)
+        self.clear_all_button = QPushButton("Clear All")
+        self.clear_all_button.clicked.connect(self._clear_all_tracks)
 
         self.title_input = QLineEdit()
         self.artist_input = QLineEdit()
@@ -138,9 +146,14 @@ class MainWindow(QMainWindow):
         self.log_view.setReadOnly(True)
         self.log_view.setMaximumHeight(100)
 
+        list_buttons_row = QHBoxLayout()
+        list_buttons_row.addWidget(self.remove_selected_button)
+        list_buttons_row.addWidget(self.clear_all_button)
+
         left_layout = QVBoxLayout()
         left_layout.addWidget(QLabel("Drop songs or a folder here"))
         left_layout.addWidget(self.track_list)
+        left_layout.addLayout(list_buttons_row)
 
         artist_row = QHBoxLayout()
         artist_row.addWidget(self.artist_input)
@@ -205,13 +218,24 @@ class MainWindow(QMainWindow):
         lyrics_layout.addWidget(self.lyrics_edit)
         lyrics_layout.addWidget(self.lrc_sidecar_checkbox)
 
-        body_layout = QHBoxLayout()
-        body_layout.addLayout(left_layout, stretch=1)
-        body_layout.addLayout(middle_layout, stretch=2)
-        body_layout.addLayout(lyrics_layout, stretch=2)
+        left_widget = QWidget()
+        left_widget.setLayout(left_layout)
+        middle_widget = QWidget()
+        middle_widget.setLayout(middle_layout)
+        lyrics_widget = QWidget()
+        lyrics_widget.setLayout(lyrics_layout)
+
+        body_splitter = QSplitter(Qt.Orientation.Horizontal)
+        body_splitter.addWidget(left_widget)
+        body_splitter.addWidget(middle_widget)
+        body_splitter.addWidget(lyrics_widget)
+        body_splitter.setStretchFactor(0, 1)
+        body_splitter.setStretchFactor(1, 2)
+        body_splitter.setStretchFactor(2, 2)
+        body_splitter.setSizes([260, 480, 480])
 
         main_layout = QVBoxLayout()
-        main_layout.addLayout(body_layout)
+        main_layout.addWidget(body_splitter)
         main_layout.addWidget(self.log_view)
 
         container = QWidget()
@@ -247,6 +271,38 @@ class MainWindow(QMainWindow):
     def _list_label(track: Track) -> str:
         suffix = f"  [{track.status}]" if track.status else ""
         return f"{track.path.name}{suffix}"
+
+    def _remove_selected_tracks(self) -> None:
+        rows = sorted({index.row() for index in self.track_list.selectedIndexes()}, reverse=True)
+        if not rows:
+            return
+        for row in rows:
+            self.track_list.takeItem(row)
+            del self.tracks[row]
+        self._refresh_selection_after_removal()
+
+    def _clear_all_tracks(self) -> None:
+        if not self.tracks:
+            return
+        reply = QMessageBox.question(
+            self,
+            "Clear all",
+            f"Remove all {len(self.tracks)} loaded track(s) from the list?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self.track_list.clear()
+        self.tracks.clear()
+        self._refresh_selection_after_removal()
+
+    def _refresh_selection_after_removal(self) -> None:
+        new_row = min(self.current_index, len(self.tracks) - 1) if self.tracks else -1
+        self.current_index = new_row
+        self.track_list.blockSignals(True)
+        self.track_list.setCurrentRow(new_row)
+        self.track_list.blockSignals(False)
+        self._load_track_into_panel(new_row)
 
     # -- detail panel --------------------------------------------------
 
@@ -403,6 +459,8 @@ class MainWindow(QMainWindow):
         self.progress_bar.setValue(0)
         self.auto_fill_selected_button.setEnabled(False)
         self.auto_fill_all_button.setEnabled(False)
+        self.remove_selected_button.setEnabled(False)
+        self.clear_all_button.setEnabled(False)
         self.cancel_button.setEnabled(True)
 
         self.worker = AutoFillWorker(self.tracks, indices)
@@ -437,6 +495,8 @@ class MainWindow(QMainWindow):
         self.worker = None
         self.auto_fill_selected_button.setEnabled(True)
         self.auto_fill_all_button.setEnabled(True)
+        self.remove_selected_button.setEnabled(True)
+        self.clear_all_button.setEnabled(True)
         self.cancel_button.setEnabled(False)
 
     # -- save ------------------------------------------------------------

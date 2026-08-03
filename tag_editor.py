@@ -148,19 +148,28 @@ def _search_lrclib(track: Track, album_hint: str) -> dict | None:
     if not candidates:
         return None
 
-    if album_hint:
-        candidates.sort(
-            key=lambda r: fuzz.token_set_ratio((r.get("albumName") or "").lower(), album_hint.lower()),
-            reverse=True,
-        )
-    else:
-        candidates.sort(key=title_artist_score, reverse=True)
+    def by_album_match(cands: list[dict]) -> list[dict]:
+        if album_hint:
+            return sorted(
+                cands,
+                key=lambda r: fuzz.token_set_ratio((r.get("albumName") or "").lower(), album_hint.lower()),
+                reverse=True,
+            )
+        return sorted(cands, key=title_artist_score, reverse=True)
 
-    best = candidates[0]
-    lyrics = best.get("syncedLyrics") or best.get("plainLyrics")
-    if not lyrics:
-        return None
-    return {"lyrics": lyrics, "source": "LRCLIB"}
+    # Prefer synced lyrics across all candidates; only fall back to plain
+    # lyrics if none of them have a synced version.
+    synced_candidates = [r for r in candidates if r.get("syncedLyrics")]
+    if synced_candidates:
+        best = by_album_match(synced_candidates)[0]
+        return {"lyrics": best["syncedLyrics"], "source": "LRCLIB"}
+
+    plain_candidates = [r for r in candidates if r.get("plainLyrics")]
+    if plain_candidates:
+        best = by_album_match(plain_candidates)[0]
+        return {"lyrics": best["plainLyrics"], "source": "LRCLIB"}
+
+    return None
 
 
 def _search_other_lyrics_providers(track: Track) -> dict | None:
@@ -169,14 +178,21 @@ def _search_other_lyrics_providers(track: Track) -> dict | None:
     if not query:
         return None
 
+    # Keep looking across providers for synced lyrics; remember the first
+    # plain-text hit as a fallback in case none of them have synced lyrics.
+    plain_fallback: dict | None = None
     for provider in (Musixmatch(), NetEase(), Megalobiz(), Genius()):
         try:
             lrc = provider.get_lrc(query)
         except Exception:
             continue
-        if lrc and (lrc.synced or lrc.unsynced):
-            return {"lyrics": lrc.synced or lrc.unsynced, "source": str(provider)}
-    return None
+        if not lrc:
+            continue
+        if lrc.synced:
+            return {"lyrics": lrc.synced, "source": str(provider)}
+        if lrc.unsynced and plain_fallback is None:
+            plain_fallback = {"lyrics": lrc.unsynced, "source": str(provider)}
+    return plain_fallback
 
 
 def search_lyrics(track: Track, album_hint: str | None = None) -> dict | None:
