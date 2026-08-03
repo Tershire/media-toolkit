@@ -13,7 +13,9 @@ from pathlib import Path
 import yt_dlp
 
 
-def build_options(output_dir: Path, audio_only: bool, playlist: bool) -> dict:
+def build_options(
+    output_dir: Path, audio_only: bool, playlist: bool, video_only: bool = False
+) -> dict:
     output_template = str(output_dir / "%(title).200B [%(id)s].%(ext)s")
 
     if audio_only:
@@ -30,6 +32,13 @@ def build_options(output_dir: Path, audio_only: bool, playlist: bool) -> dict:
             "noplaylist": not playlist,
         }
 
+    if video_only:
+        return {
+            "format": "bestvideo[ext=mp4]/bestvideo",
+            "outtmpl": output_template,
+            "noplaylist": not playlist,
+        }
+
     return {
         "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
         "merge_output_format": "mp4",
@@ -38,9 +47,11 @@ def build_options(output_dir: Path, audio_only: bool, playlist: bool) -> dict:
     }
 
 
-def download(url: str, output_dir: Path, audio_only: bool, playlist: bool) -> None:
+def download(
+    url: str, output_dir: Path, audio_only: bool, playlist: bool, video_only: bool = False
+) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
-    options = build_options(output_dir, audio_only, playlist)
+    options = build_options(output_dir, audio_only, playlist, video_only)
 
     with yt_dlp.YoutubeDL(options) as ydl:
         ydl.download([url])
@@ -57,10 +68,16 @@ def parse_args() -> argparse.Namespace:
         default="downloads",
         help="Directory to save downloaded files. Default: downloads",
     )
-    parser.add_argument(
+    av_group = parser.add_mutually_exclusive_group()
+    av_group.add_argument(
         "--audio-only",
         action="store_true",
         help="Download audio only and convert it to MP3. Requires ffmpeg.",
+    )
+    av_group.add_argument(
+        "--video-only",
+        action="store_true",
+        help="Download video only, without audio.",
     )
     parser.add_argument(
         "--playlist",
@@ -73,7 +90,9 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    download(args.url, Path(args.output_dir), args.audio_only, args.playlist)
+    download(
+        args.url, Path(args.output_dir), args.audio_only, args.playlist, args.video_only
+    )
 
 
 if __name__ == "__main__":

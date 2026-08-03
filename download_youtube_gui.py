@@ -41,12 +41,20 @@ class DownloadWorker(QThread):
     finished_ok = Signal()
     failed = Signal(str)
 
-    def __init__(self, url: str, output_dir: Path, audio_only: bool, playlist: bool):
+    def __init__(
+        self,
+        url: str,
+        output_dir: Path,
+        audio_only: bool,
+        playlist: bool,
+        video_only: bool = False,
+    ):
         super().__init__()
         self.url = url
         self.output_dir = output_dir
         self.audio_only = audio_only
         self.playlist = playlist
+        self.video_only = video_only
         self._cancelled = False
 
     def cancel(self) -> None:
@@ -68,7 +76,9 @@ class DownloadWorker(QThread):
     def run(self) -> None:
         try:
             self.output_dir.mkdir(parents=True, exist_ok=True)
-            options = build_options(self.output_dir, self.audio_only, self.playlist)
+            options = build_options(
+                self.output_dir, self.audio_only, self.playlist, self.video_only
+            )
             options["progress_hooks"] = [self._progress_hook]
 
             with yt_dlp.YoutubeDL(options) as ydl:
@@ -95,6 +105,13 @@ class MainWindow(QMainWindow):
         browse_button.clicked.connect(self._browse_output_dir)
 
         self.audio_only_checkbox = QCheckBox("Audio only (MP3)")
+        self.audio_only_checkbox.toggled.connect(
+            lambda checked: checked and self.video_only_checkbox.setChecked(False)
+        )
+        self.video_only_checkbox = QCheckBox("Video only (no audio)")
+        self.video_only_checkbox.toggled.connect(
+            lambda checked: checked and self.audio_only_checkbox.setChecked(False)
+        )
         self.playlist_checkbox = QCheckBox("Download whole playlist")
 
         self.download_button = QPushButton("Download")
@@ -123,6 +140,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(QLabel("Output directory"))
         layout.addLayout(output_dir_row)
         layout.addWidget(self.audio_only_checkbox)
+        layout.addWidget(self.video_only_checkbox)
         layout.addWidget(self.playlist_checkbox)
         layout.addLayout(buttons_row)
         layout.addWidget(self.progress_bar)
@@ -156,6 +174,7 @@ class MainWindow(QMainWindow):
             output_dir,
             self.audio_only_checkbox.isChecked(),
             self.playlist_checkbox.isChecked(),
+            self.video_only_checkbox.isChecked(),
         )
         self.worker.progress.connect(self._on_progress)
         self.worker.log_message.connect(self.log_view.appendPlainText)
