@@ -64,6 +64,21 @@ def sanitize_filename(name: str) -> str:
     return cleaned or "untitled"
 
 
+LRC_TIMESTAMP_RE = re.compile(r"\[(\d+):(\d+(?:\.\d+)?)\]")
+
+
+def parse_lrc_timestamps(text: str) -> list[tuple[float, int]]:
+    """Return (seconds, line_index) pairs for each [mm:ss.xx] tag in `text`, sorted by time."""
+    entries: list[tuple[float, int]] = []
+    for line_index, line in enumerate(text.split("\n")):
+        for match in LRC_TIMESTAMP_RE.finditer(line):
+            minutes = int(match.group(1))
+            seconds = float(match.group(2))
+            entries.append((minutes * 60 + seconds, line_index))
+    entries.sort(key=lambda entry: entry[0])
+    return entries
+
+
 def read_existing_tags(path: Path) -> dict:
     """Read whatever ID3 tags are already embedded in the file, if any."""
     if path.suffix.lower() != ".mp3":

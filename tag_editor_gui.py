@@ -9,8 +9,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QThread, Signal, Qt
-from PySide6.QtGui import QDragEnterEvent, QDropEvent, QPixmap
+from PySide6.QtCore import QThread, QUrl, Signal, Qt
+from PySide6.QtGui import QColor, QDragEnterEvent, QDropEvent, QPixmap, QTextCursor, QTextFormat
+from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -27,7 +28,9 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QSlider,
     QSplitter,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -36,6 +39,34 @@ from tag_editor import Track, load_tracks, save_track
 import tag_editor
 
 ART_THUMBNAIL_SIZE = 150
+LYRICS_HIGHLIGHT_COLOR = QColor(255, 235, 59)
+
+
+class ClickableSlider(QSlider):
+    """A QSlider that jumps to the clicked position and supports dragging the handle."""
+
+    def _value_from_x(self, x: float) -> int:
+        ratio = max(0.0, min(1.0, x / max(1, self.width())))
+        return self.minimum() + round(ratio * (self.maximum() - self.minimum()))
+
+    def _seek_to(self, x: float) -> None:
+        value = self._value_from_x(x)
+        self.setValue(value)
+        self.sliderMoved.emit(value)
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton and self.orientation() == Qt.Orientation.Horizontal:
+            self._seek_to(event.position().x())
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        if event.buttons() & Qt.MouseButton.LeftButton and self.orientation() == Qt.Orientation.Horizontal:
+            self._seek_to(event.position().x())
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
 
 
 class AutoFillWorker(QThread):
@@ -153,6 +184,23 @@ class MainWindow(QMainWindow):
         self.worker: AutoFillWorker | None = None
         self.lyrics_search_worker: LyricsSearchWorker | None = None
         self._lyrics_search_target: Track | None = None
+        self._pending_play = False
+
+        self.media_player = QMediaPlayer()
+        self.audio_output = QAudioOutput()
+        self.media_player.setAudioOutput(self.audio_output)
+        self.media_player.positionChanged.connect(self._on_playback_position_changed)
+        self.media_player.durationChanged.connect(self._on_playback_duration_changed)
+        self.media_player.playbackStateChanged.connect(self._on_playback_state_changed)
+        self.media_player.mediaStatusChanged.connect(self._on_media_status_changed)
+        self.media_player.errorOccurred.connect(self._on_playback_error)
+
+        self.play_pause_button = QPushButton("▶ Play")
+        self.play_pause_button.clicked.connect(self._toggle_playback)
+        self.playback_time_label = QLabel("00:00 / 00:00")
+        self.seek_slider = ClickableSlider(Qt.Orientation.Horizontal)
+        self.seek_slider.setRange(0, 0)
+        self.seek_slider.sliderMoved.connect(self._on_seek_slider_moved)
 
         self.track_list = QListWidget()
         self.track_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
@@ -289,7 +337,13 @@ class MainWindow(QMainWindow):
         middle_layout.addWidget(self.progress_bar)
         middle_layout.addStretch()
 
+        player_row = QHBoxLayout()
+        player_row.addWidget(self.play_pause_button)
+        player_row.addWidget(self.seek_slider)
+        player_row.addWidget(self.playback_time_label)
+
         lyrics_layout = QVBoxLayout()
+        lyrics_layout.addLayout(player_row)
         lyrics_layout.addWidget(QLabel("Lyrics"))
         lyrics_layout.addWidget(self.search_lyrics_button)
         lyrics_layout.addWidget(self.lyrics_source_label)
@@ -381,6 +435,7 @@ class MainWindow(QMainWindow):
         self.track_list.setCurrentRow(new_row)
         self.track_list.blockSignals(False)
         self._load_track_into_panel(new_row)
+        self._load_track_for_playback(new_row)
 
     # -- detail panel --------------------------------------------------
 
@@ -458,6 +513,115 @@ class MainWindow(QMainWindow):
         self._commit_current_track_fields()
         self.current_index = new_row
         self._load_track_into_panel(new_row)
+        self._load_track_for_playback(new_row)
+
+    # -- playback --------------------------------------------------------
+
+    def _load_track_for_playback(self, row: int) -> None:
+        self.media_player.stop()
+        self._pending_play = False
+        if 0 <= row < len(self.tracks):
+            self.media_player.setSource(QUrl.fromLocalFile(str(self.tracks[row].path)))
+        else:
+            self.media_player.setSource(QUrl())
+        self.seek_slider.setRange(0, 0)
+        self.playback_time_label.setText("00:00 / 00:00")
+        self.lyrics_edit.setExtraSelections([])
+
+    def _toggle_playback(self) -> None:
+        if self.media_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            self.media_player.pause()
+            self._pending_play = False
+            return
+
+        status = self.media_player.mediaStatus()
+        if status in (
+            QMediaPlayer.MediaStatus.LoadingMedia,
+            QMediaPlayer.MediaStatus.NoMedia,
+        ):
+            # Media isn't ready yet - play as soon as it finishes loading.
+            self._pending_play = True
+            return
+
+        # Nudging the position before play() works around the FFmpeg backend
+        # sometimes not starting playback on the very first play() call.
+        self.media_player.setPosition(self.media_player.position())
+        self.media_player.play()
+
+    def _on_media_status_changed(self, status: QMediaPlayer.MediaStatus) -> None:
+        if self._pending_play and status in (
+            QMediaPlayer.MediaStatus.LoadedMedia,
+            QMediaPlayer.MediaStatus.BufferedMedia,
+        ):
+            self._pending_play = False
+            self.media_player.setPosition(self.media_player.position())
+            self.media_player.play()
+
+    def _on_seek_slider_moved(self, value: int) -> None:
+        self.media_player.setPosition(value)
+
+    def _on_playback_position_changed(self, position_ms: int) -> None:
+        if not self.seek_slider.isSliderDown():
+            self.seek_slider.setValue(position_ms)
+        self._update_playback_time_label(position_ms, self.media_player.duration())
+        self._highlight_lyrics_line(position_ms)
+
+    def _on_playback_duration_changed(self, duration_ms: int) -> None:
+        self.seek_slider.setRange(0, duration_ms)
+        self._update_playback_time_label(self.media_player.position(), duration_ms)
+
+    def _on_playback_state_changed(self, state: QMediaPlayer.PlaybackState) -> None:
+        if state == QMediaPlayer.PlaybackState.PlayingState:
+            self.play_pause_button.setText("⏸ Pause")
+        else:
+            self.play_pause_button.setText("▶ Play")
+
+    def _on_playback_error(self, error: QMediaPlayer.Error, error_string: str) -> None:
+        if error != QMediaPlayer.Error.NoError:
+            self.log_view.appendPlainText(f"Playback error: {error_string}")
+
+    def _update_playback_time_label(self, position_ms: int, duration_ms: int) -> None:
+        self.playback_time_label.setText(
+            f"{self._format_ms(position_ms)} / {self._format_ms(duration_ms)}"
+        )
+
+    @staticmethod
+    def _format_ms(ms: int) -> str:
+        total_seconds = max(0, ms) // 1000
+        minutes, seconds = divmod(total_seconds, 60)
+        return f"{minutes:02}:{seconds:02}"
+
+    def _highlight_lyrics_line(self, position_ms: int) -> None:
+        timestamps = tag_editor.parse_lrc_timestamps(self.lyrics_edit.toPlainText())
+        if not timestamps:
+            self.lyrics_edit.setExtraSelections([])
+            return
+
+        position_seconds = position_ms / 1000.0
+        active_line = None
+        for seconds, line_index in timestamps:
+            if seconds <= position_seconds:
+                active_line = line_index
+            else:
+                break
+        if active_line is None:
+            self.lyrics_edit.setExtraSelections([])
+            return
+
+        block = self.lyrics_edit.document().findBlockByNumber(active_line)
+        if not block.isValid():
+            self.lyrics_edit.setExtraSelections([])
+            return
+
+        selection = QTextEdit.ExtraSelection()
+        selection.format.setBackground(LYRICS_HIGHLIGHT_COLOR)
+        selection.format.setProperty(QTextFormat.Property.FullWidthSelection, True)
+        selection.cursor = QTextCursor(block)
+        self.lyrics_edit.setExtraSelections([selection])
+
+        if not self.lyrics_edit.hasFocus():
+            self.lyrics_edit.setTextCursor(QTextCursor(block))
+            self.lyrics_edit.ensureCursorVisible()
 
     def _browse_album_art(self) -> None:
         if not (0 <= self.current_index < len(self.tracks)):
