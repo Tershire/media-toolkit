@@ -122,31 +122,41 @@ def search_metadata(track: Track) -> dict:
     }
 
 
-def _search_lrclib(track: Track, album_hint: str) -> dict | None:
-    """Search LRCLIB directly so results can be ranked by album similarity.
+def _fetch_lrclib_results(track: Track) -> list[dict]:
+    """Search LRCLIB directly and return raw results that plausibly match.
 
     LRCLIB is the only lyrics provider that returns album names alongside
-    results, so it's the only one we can rank by album match ourselves.
+    results, so it's the only one we can rank/list by album match ourselves.
     """
     query = f"{track.artist} {track.title}".strip()
     if not query:
-        return None
+        return []
 
     response = requests.get(LRCLIB_SEARCH_URL, params={"q": query}, timeout=10)
     if not response.ok:
-        return None
+        return []
     results = response.json()
     if not results:
-        return None
+        return []
 
     def title_artist_score(entry: dict) -> float:
         return fuzz.token_set_ratio(
             f'{entry.get("artistName", "")} {entry.get("trackName", "")}'.lower(), query.lower()
         )
 
-    candidates = [r for r in results if title_artist_score(r) >= LYRICS_MATCH_MIN_SCORE]
+    return [r for r in results if title_artist_score(r) >= LYRICS_MATCH_MIN_SCORE]
+
+
+def _search_lrclib(track: Track, album_hint: str) -> dict | None:
+    query = f"{track.artist} {track.title}".strip()
+    candidates = _fetch_lrclib_results(track)
     if not candidates:
         return None
+
+    def title_artist_score(entry: dict) -> float:
+        return fuzz.token_set_ratio(
+            f'{entry.get("artistName", "")} {entry.get("trackName", "")}'.lower(), query.lower()
+        )
 
     def by_album_match(cands: list[dict]) -> list[dict]:
         if album_hint:
@@ -199,6 +209,68 @@ def search_lyrics(track: Track, album_hint: str | None = None) -> dict | None:
     """Look up (synced) lyrics, preferring the result closest to `album_hint`."""
     album = track.album if album_hint is None else album_hint
     return _search_lrclib(track, album) or _search_other_lyrics_providers(track)
+
+
+def search_lyrics_candidates(
+    track: Track, album_hint: str | None = None, limit: int = 10
+) -> list[dict]:
+    """Return multiple lyrics candidates (LRCLIB results + other providers) for review.
+
+    Unlike `search_lyrics`, this doesn't pick a single "best" result - it's meant
+    for a UI where the user reviews and picks one themselves.
+    """
+    album = track.album if album_hint is None else album_hint
+    query = f"{track.artist} {track.title}".strip()
+
+    lrclib_results = _fetch_lrclib_results(track)
+    if album:
+        lrclib_results = sorted(
+            lrclib_results,
+            key=lambda r: fuzz.token_set_ratio((r.get("albumName") or "").lower(), album.lower()),
+            reverse=True,
+        )
+
+    candidates: list[dict] = []
+    for r in lrclib_results:
+        lyrics = r.get("syncedLyrics") or r.get("plainLyrics")
+        if not lyrics:
+            continue
+        candidates.append(
+            {
+                "source": "LRCLIB",
+                "album": r.get("albumName") or "",
+                "artist": r.get("artistName") or track.artist,
+                "title": r.get("trackName") or track.title,
+                "lyrics": lyrics,
+                "type": "synced" if r.get("syncedLyrics") else "plain",
+            }
+        )
+        if len(candidates) >= limit:
+            break
+
+    if query:
+        for provider in (Musixmatch(), NetEase(), Megalobiz(), Genius()):
+            try:
+                lrc = provider.get_lrc(query)
+            except Exception:
+                continue
+            if not lrc:
+                continue
+            lyrics = lrc.synced or lrc.unsynced
+            if not lyrics:
+                continue
+            candidates.append(
+                {
+                    "source": str(provider),
+                    "album": "",
+                    "artist": track.artist,
+                    "title": track.title,
+                    "lyrics": lyrics,
+                    "type": "synced" if lrc.synced else "plain",
+                }
+            )
+
+    return candidates
 
 
 def auto_fill(track: Track) -> Track:

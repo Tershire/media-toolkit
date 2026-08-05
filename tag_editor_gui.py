@@ -15,6 +15,8 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QCheckBox,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -70,6 +72,76 @@ class AutoFillWorker(QThread):
             self.progress.emit(done, total)
 
 
+class LyricsSearchWorker(QThread):
+    results_ready = Signal(list)
+    failed = Signal(str)
+
+    def __init__(self, artist: str, title: str, album_hint: str):
+        super().__init__()
+        self.artist = artist
+        self.title = title
+        self.album_hint = album_hint
+
+    def run(self) -> None:
+        try:
+            track = Track(path=Path("."), artist=self.artist, title=self.title)
+            candidates = tag_editor.search_lyrics_candidates(track, album_hint=self.album_hint)
+        except Exception as exc:  # noqa: BLE001 - surface any lookup failure
+            self.failed.emit(str(exc))
+        else:
+            self.results_ready.emit(candidates)
+
+
+class LyricsPickerDialog(QDialog):
+    def __init__(self, candidates: list[dict], parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Select Lyrics")
+        self.resize(560, 480)
+        self.candidates = candidates
+        self.selected_candidate: dict | None = None
+
+        self.result_list = QListWidget()
+        for candidate in candidates:
+            album = candidate["album"] or "(no album)"
+            self.result_list.addItem(f"[{candidate['source']}] {album} — {candidate['type']}")
+        self.result_list.currentRowChanged.connect(self._on_selection_changed)
+
+        self.preview = QPlainTextEdit()
+        self.preview.setReadOnly(True)
+
+        self.button_box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        self.button_box.accepted.connect(self._on_accept)
+        self.button_box.rejected.connect(self.reject)
+        self.button_box.button(QDialogButtonBox.StandardButton.Ok).setEnabled(False)
+
+        layout = QVBoxLayout()
+        layout.addWidget(QLabel(f"{len(candidates)} result(s) found — pick one:"))
+        layout.addWidget(self.result_list)
+        layout.addWidget(QLabel("Preview"))
+        layout.addWidget(self.preview)
+        layout.addWidget(self.button_box)
+        self.setLayout(layout)
+
+        if candidates:
+            self.result_list.setCurrentRow(0)
+
+    def _on_selection_changed(self, row: int) -> None:
+        if 0 <= row < len(self.candidates):
+            self.preview.setPlainText(self.candidates[row]["lyrics"])
+            self.button_box.button(QDialogButtonBox.StandardButton.Ok).setEnabled(True)
+        else:
+            self.preview.clear()
+            self.button_box.button(QDialogButtonBox.StandardButton.Ok).setEnabled(False)
+
+    def _on_accept(self) -> None:
+        row = self.result_list.currentRow()
+        if 0 <= row < len(self.candidates):
+            self.selected_candidate = self.candidates[row]
+            self.accept()
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -79,6 +151,8 @@ class MainWindow(QMainWindow):
         self.tracks: list[Track] = []
         self.current_index: int = -1
         self.worker: AutoFillWorker | None = None
+        self.lyrics_search_worker: LyricsSearchWorker | None = None
+        self._lyrics_search_target: Track | None = None
 
         self.track_list = QListWidget()
         self.track_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
@@ -119,6 +193,9 @@ class MainWindow(QMainWindow):
         self.save_art_button.clicked.connect(self._save_album_art_as)
         self.apply_art_button = QPushButton("Apply to All")
         self.apply_art_button.clicked.connect(self._apply_album_art_to_all)
+
+        self.search_lyrics_button = QPushButton("Search Lyrics...")
+        self.search_lyrics_button.clicked.connect(self._search_lyrics_for_selected)
 
         self.lyrics_edit = QPlainTextEdit()
         self.lyrics_source_label = QLabel("")
@@ -214,6 +291,7 @@ class MainWindow(QMainWindow):
 
         lyrics_layout = QVBoxLayout()
         lyrics_layout.addWidget(QLabel("Lyrics"))
+        lyrics_layout.addWidget(self.search_lyrics_button)
         lyrics_layout.addWidget(self.lyrics_source_label)
         lyrics_layout.addWidget(self.lyrics_edit)
         lyrics_layout.addWidget(self.lrc_sidecar_checkbox)
@@ -324,6 +402,7 @@ class MainWindow(QMainWindow):
             self.apply_genre_button,
             self.apply_year_button,
             self.apply_art_button,
+            self.search_lyrics_button,
         ):
             widget.setEnabled(enabled)
 
@@ -448,6 +527,47 @@ class MainWindow(QMainWindow):
         for other in self.tracks:
             other.album_art = track.album_art
         self.log_view.appendPlainText(f"Applied album art to all {len(self.tracks)} track(s).")
+
+    # -- lyrics search -------------------------------------------------
+
+    def _search_lyrics_for_selected(self) -> None:
+        if not (0 <= self.current_index < len(self.tracks)) or self.lyrics_search_worker is not None:
+            return
+        self._commit_current_track_fields()
+        track = self.tracks[self.current_index]
+        self._lyrics_search_target = track
+
+        self.search_lyrics_button.setEnabled(False)
+        self.log_view.appendPlainText(f"Searching lyrics for {track.artist} - {track.title}...")
+
+        self.lyrics_search_worker = LyricsSearchWorker(track.artist, track.title, track.album)
+        self.lyrics_search_worker.results_ready.connect(self._on_lyrics_search_results)
+        self.lyrics_search_worker.failed.connect(self._on_lyrics_search_failed)
+        self.lyrics_search_worker.finished.connect(self._on_lyrics_search_finished)
+        self.lyrics_search_worker.start()
+
+    def _on_lyrics_search_results(self, candidates: list[dict]) -> None:
+        target = self._lyrics_search_target
+        if not candidates:
+            QMessageBox.information(self, "No lyrics found", "No lyrics results were found for this track.")
+            return
+
+        dialog = LyricsPickerDialog(candidates, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted and dialog.selected_candidate and target is not None:
+            chosen = dialog.selected_candidate
+            target.lyrics = chosen["lyrics"]
+            target.lyrics_source = chosen["source"]
+            self.log_view.appendPlainText(f"Lyrics set from {chosen['source']} for {target.path.name}.")
+            if 0 <= self.current_index < len(self.tracks) and self.tracks[self.current_index] is target:
+                self._load_track_into_panel(self.current_index)
+
+    def _on_lyrics_search_failed(self, message: str) -> None:
+        QMessageBox.warning(self, "Lyrics search failed", message)
+
+    def _on_lyrics_search_finished(self) -> None:
+        self.lyrics_search_worker = None
+        self._lyrics_search_target = None
+        self.search_lyrics_button.setEnabled(True)
 
     # -- auto-fill -----------------------------------------------------
 
