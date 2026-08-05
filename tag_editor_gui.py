@@ -9,8 +9,19 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QThread, QUrl, Signal, Qt
-from PySide6.QtGui import QColor, QDragEnterEvent, QDropEvent, QPixmap, QTextCursor, QTextFormat
+from PySide6.QtCore import QPointF, QRectF, QSize, QThread, QUrl, Signal, Qt
+from PySide6.QtGui import (
+    QColor,
+    QDragEnterEvent,
+    QDropEvent,
+    QIcon,
+    QPainter,
+    QPalette,
+    QPen,
+    QPixmap,
+    QPolygonF,
+    QTextCursor,
+)
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -19,6 +30,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFileDialog,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -30,7 +42,6 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSlider,
     QSplitter,
-    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -39,7 +50,89 @@ from tag_editor import Track, load_tracks, save_track
 import tag_editor
 
 ART_THUMBNAIL_SIZE = 150
-LYRICS_HIGHLIGHT_COLOR = QColor(255, 235, 59)
+
+
+def _paint_play_symbol(painter: QPainter, size: int, color: QColor) -> None:
+    painter.setBrush(color)
+    painter.setPen(Qt.PenStyle.NoPen)
+    m = size * 0.22
+    triangle = QPolygonF(
+        [QPointF(m, m * 0.6), QPointF(m, size - m * 0.6), QPointF(size - m * 0.7, size / 2)]
+    )
+    painter.drawPolygon(triangle)
+
+
+def _paint_pause_symbol(painter: QPainter, size: int, color: QColor) -> None:
+    painter.setBrush(color)
+    painter.setPen(Qt.PenStyle.NoPen)
+    bar_width = size * 0.22
+    m = size * 0.2
+    painter.drawRect(QRectF(m, m, bar_width, size - 2 * m))
+    painter.drawRect(QRectF(size - m - bar_width, m, bar_width, size - 2 * m))
+
+
+def _paint_volume_symbol(painter: QPainter, size: int, color: QColor) -> None:
+    painter.setBrush(color)
+    painter.setPen(Qt.PenStyle.NoPen)
+    body = QPolygonF(
+        [
+            QPointF(size * 0.12, size * 0.38),
+            QPointF(size * 0.32, size * 0.38),
+            QPointF(size * 0.52, size * 0.18),
+            QPointF(size * 0.52, size * 0.82),
+            QPointF(size * 0.32, size * 0.62),
+            QPointF(size * 0.12, size * 0.62),
+        ]
+    )
+    painter.drawPolygon(body)
+
+    pen = QPen(color, max(1.0, size * 0.09))
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    painter.setPen(pen)
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    arc_rect = QRectF(size * 0.55, size * 0.28, size * 0.32, size * 0.44)
+    painter.drawArc(arc_rect, -50 * 16, 100 * 16)
+
+
+def _render_symbol(paint_fn, color: QColor, size: int = 18) -> QPixmap:
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    paint_fn(painter, size, color)
+    painter.end()
+    return pixmap
+
+
+class LyricsTextEdit(QPlainTextEdit):
+    """A QPlainTextEdit that can outline one block/line with the system accent color."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._highlighted_block = -1
+
+    def set_highlighted_block(self, block_number: int) -> None:
+        if self._highlighted_block != block_number:
+            self._highlighted_block = block_number
+            self.viewport().update()
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+        if self._highlighted_block < 0:
+            return
+        block = self.document().findBlockByNumber(self._highlighted_block)
+        if not block.isValid():
+            return
+        rect = self.blockBoundingGeometry(block).translated(self.contentOffset()).toRect()
+        if not event.rect().intersects(rect):
+            return
+
+        painter = QPainter(self.viewport())
+        pen = QPen(self.palette().color(QPalette.ColorRole.Highlight))
+        pen.setWidth(2)
+        painter.setPen(pen)
+        painter.drawRect(rect.adjusted(1, 1, -2, -2))
+        painter.end()
 
 
 class ClickableSlider(QSlider):
@@ -186,6 +279,11 @@ class MainWindow(QMainWindow):
         self._lyrics_search_target: Track | None = None
         self._pending_play = False
 
+        accent_color = self.palette().color(QPalette.ColorRole.Highlight)
+        self._play_icon = QIcon(_render_symbol(_paint_play_symbol, accent_color))
+        self._pause_icon = QIcon(_render_symbol(_paint_pause_symbol, accent_color))
+        volume_pixmap = _render_symbol(_paint_volume_symbol, accent_color, size=16)
+
         self.media_player = QMediaPlayer()
         self.audio_output = QAudioOutput()
         self.media_player.setAudioOutput(self.audio_output)
@@ -195,12 +293,22 @@ class MainWindow(QMainWindow):
         self.media_player.mediaStatusChanged.connect(self._on_media_status_changed)
         self.media_player.errorOccurred.connect(self._on_playback_error)
 
-        self.play_pause_button = QPushButton("▶ Play")
+        self.play_pause_button = QPushButton(" Play")
+        self.play_pause_button.setIcon(self._play_icon)
+        self.play_pause_button.setIconSize(QSize(16, 16))
         self.play_pause_button.clicked.connect(self._toggle_playback)
         self.playback_time_label = QLabel("00:00 / 00:00")
         self.seek_slider = ClickableSlider(Qt.Orientation.Horizontal)
         self.seek_slider.setRange(0, 0)
         self.seek_slider.sliderMoved.connect(self._on_seek_slider_moved)
+
+        self.volume_slider = ClickableSlider(Qt.Orientation.Horizontal)
+        self.volume_slider.setRange(0, 100)
+        self.volume_slider.setFixedWidth(80)
+        self.volume_label = QLabel("100%")
+        self.volume_label.setFixedWidth(36)
+        self.volume_slider.valueChanged.connect(self._on_volume_changed)
+        self.volume_slider.setValue(100)
 
         self.track_list = QListWidget()
         self.track_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
@@ -245,11 +353,13 @@ class MainWindow(QMainWindow):
         self.search_lyrics_button = QPushButton("Search Lyrics...")
         self.search_lyrics_button.clicked.connect(self._search_lyrics_for_selected)
 
-        self.lyrics_edit = QPlainTextEdit()
+        self.lyrics_edit = LyricsTextEdit()
         self.lyrics_source_label = QLabel("")
         self.lyrics_source_label.setStyleSheet("color: gray; font-style: italic;")
         self.lrc_sidecar_checkbox = QCheckBox("Also write .lrc sidecar file")
+        self.lrc_sidecar_checkbox.setChecked(True)
         self.rename_checkbox = QCheckBox("Rename file to match title")
+        self.rename_checkbox.setChecked(True)
 
         self.auto_fill_selected_button = QPushButton("Auto-Fill (Selected)")
         self.auto_fill_selected_button.clicked.connect(self._auto_fill_selected)
@@ -307,15 +417,6 @@ class MainWindow(QMainWindow):
         art_row.addWidget(self.apply_art_button)
         art_row.addStretch()
 
-        auto_fill_row = QHBoxLayout()
-        auto_fill_row.addWidget(self.auto_fill_selected_button)
-        auto_fill_row.addWidget(self.auto_fill_all_button)
-        auto_fill_row.addWidget(self.cancel_button)
-
-        save_row = QHBoxLayout()
-        save_row.addWidget(self.save_selected_button)
-        save_row.addWidget(self.save_all_button)
-
         middle_layout = QVBoxLayout()
         middle_layout.addWidget(QLabel("Title"))
         middle_layout.addWidget(self.title_input)
@@ -332,18 +433,25 @@ class MainWindow(QMainWindow):
         middle_layout.addWidget(QLabel("Album art"))
         middle_layout.addLayout(art_row)
         middle_layout.addWidget(self.rename_checkbox)
-        middle_layout.addLayout(auto_fill_row)
-        middle_layout.addLayout(save_row)
-        middle_layout.addWidget(self.progress_bar)
         middle_layout.addStretch()
 
         player_row = QHBoxLayout()
         player_row.addWidget(self.play_pause_button)
-        player_row.addWidget(self.seek_slider)
+        player_row.addWidget(self.seek_slider, 1)
         player_row.addWidget(self.playback_time_label)
+
+        volume_icon_label = QLabel()
+        volume_icon_label.setPixmap(volume_pixmap)
+
+        volume_row = QHBoxLayout()
+        volume_row.addStretch()
+        volume_row.addWidget(volume_icon_label)
+        volume_row.addWidget(self.volume_slider)
+        volume_row.addWidget(self.volume_label)
 
         lyrics_layout = QVBoxLayout()
         lyrics_layout.addLayout(player_row)
+        lyrics_layout.addLayout(volume_row)
         lyrics_layout.addWidget(QLabel("Lyrics"))
         lyrics_layout.addWidget(self.search_lyrics_button)
         lyrics_layout.addWidget(self.lyrics_source_label)
@@ -366,8 +474,26 @@ class MainWindow(QMainWindow):
         body_splitter.setStretchFactor(2, 2)
         body_splitter.setSizes([260, 480, 480])
 
+        auto_fill_row = QHBoxLayout()
+        auto_fill_row.addWidget(self.auto_fill_selected_button)
+        auto_fill_row.addWidget(self.auto_fill_all_button)
+        auto_fill_row.addWidget(self.cancel_button)
+
+        save_row = QHBoxLayout()
+        save_row.addWidget(self.save_selected_button)
+        save_row.addWidget(self.save_all_button)
+
+        actions_layout = QVBoxLayout()
+        actions_layout.addLayout(auto_fill_row)
+        actions_layout.addLayout(save_row)
+        actions_layout.addWidget(self.progress_bar)
+
+        actions_group = QGroupBox("Batch Actions")
+        actions_group.setLayout(actions_layout)
+
         main_layout = QVBoxLayout()
         main_layout.addWidget(body_splitter)
+        main_layout.addWidget(actions_group)
         main_layout.addWidget(self.log_view)
 
         container = QWidget()
@@ -560,6 +686,10 @@ class MainWindow(QMainWindow):
     def _on_seek_slider_moved(self, value: int) -> None:
         self.media_player.setPosition(value)
 
+    def _on_volume_changed(self, value: int) -> None:
+        self.audio_output.setVolume(value / 100.0)
+        self.volume_label.setText(f"{value}%")
+
     def _on_playback_position_changed(self, position_ms: int) -> None:
         if not self.seek_slider.isSliderDown():
             self.seek_slider.setValue(position_ms)
@@ -572,9 +702,11 @@ class MainWindow(QMainWindow):
 
     def _on_playback_state_changed(self, state: QMediaPlayer.PlaybackState) -> None:
         if state == QMediaPlayer.PlaybackState.PlayingState:
-            self.play_pause_button.setText("⏸ Pause")
+            self.play_pause_button.setIcon(self._pause_icon)
+            self.play_pause_button.setText(" Pause")
         else:
-            self.play_pause_button.setText("▶ Play")
+            self.play_pause_button.setIcon(self._play_icon)
+            self.play_pause_button.setText(" Play")
 
     def _on_playback_error(self, error: QMediaPlayer.Error, error_string: str) -> None:
         if error != QMediaPlayer.Error.NoError:
@@ -594,7 +726,7 @@ class MainWindow(QMainWindow):
     def _highlight_lyrics_line(self, position_ms: int) -> None:
         timestamps = tag_editor.parse_lrc_timestamps(self.lyrics_edit.toPlainText())
         if not timestamps:
-            self.lyrics_edit.setExtraSelections([])
+            self.lyrics_edit.set_highlighted_block(-1)
             return
 
         position_seconds = position_ms / 1000.0
@@ -605,19 +737,15 @@ class MainWindow(QMainWindow):
             else:
                 break
         if active_line is None:
-            self.lyrics_edit.setExtraSelections([])
+            self.lyrics_edit.set_highlighted_block(-1)
             return
 
         block = self.lyrics_edit.document().findBlockByNumber(active_line)
         if not block.isValid():
-            self.lyrics_edit.setExtraSelections([])
+            self.lyrics_edit.set_highlighted_block(-1)
             return
 
-        selection = QTextEdit.ExtraSelection()
-        selection.format.setBackground(LYRICS_HIGHLIGHT_COLOR)
-        selection.format.setProperty(QTextFormat.Property.FullWidthSelection, True)
-        selection.cursor = QTextCursor(block)
-        self.lyrics_edit.setExtraSelections([selection])
+        self.lyrics_edit.set_highlighted_block(active_line)
 
         if not self.lyrics_edit.hasFocus():
             self.lyrics_edit.setTextCursor(QTextCursor(block))
