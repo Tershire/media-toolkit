@@ -64,6 +64,47 @@ def sanitize_filename(name: str) -> str:
     return cleaned or "untitled"
 
 
+def read_existing_tags(path: Path) -> dict:
+    """Read whatever ID3 tags are already embedded in the file, if any."""
+    if path.suffix.lower() != ".mp3":
+        return {}
+    try:
+        audio = MP3(path)
+    except Exception:
+        return {}
+    tags = audio.tags
+    if tags is None:
+        return {}
+
+    def text_of(frame_id: str) -> str:
+        frames = tags.getall(frame_id)
+        return str(frames[0]) if frames else ""
+
+    result = {}
+    for field_name, frame_id in (
+        ("title", "TIT2"),
+        ("artist", "TPE1"),
+        ("album", "TALB"),
+        ("track_number", "TRCK"),
+        ("genre", "TCON"),
+        ("year", "TDRC"),
+    ):
+        value = text_of(frame_id)
+        if value:
+            result[field_name] = value
+
+    uslt_frames = tags.getall("USLT")
+    if uslt_frames and uslt_frames[0].text:
+        result["lyrics"] = uslt_frames[0].text
+        result["lyrics_source"] = "(existing tag)"
+
+    apic_frames = tags.getall("APIC")
+    if apic_frames and apic_frames[0].data:
+        result["album_art"] = apic_frames[0].data
+
+    return result
+
+
 def load_tracks(paths: list[Path]) -> list[Track]:
     files: list[Path] = []
     for path in paths:
@@ -77,7 +118,10 @@ def load_tracks(paths: list[Path]) -> list[Track]:
     tracks = []
     for file_path in files:
         artist, title = _parse_filename(file_path)
-        tracks.append(Track(path=file_path, title=title, artist=artist))
+        track = Track(path=file_path, title=title, artist=artist)
+        for field_name, value in read_existing_tags(file_path).items():
+            setattr(track, field_name, value)
+        tracks.append(track)
     return tracks
 
 
